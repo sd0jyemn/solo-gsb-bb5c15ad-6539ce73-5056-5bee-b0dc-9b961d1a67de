@@ -507,7 +507,7 @@
     // ---------------------------------------------------------------------
     // 初始化
     // ---------------------------------------------------------------------
-    async function initPlayer(fileId, runId) {
+    async function initPlayer(fileId, runId, startT) {
       listView.style.display = 'none';
       playerView.style.display = '';
       let payload;
@@ -540,13 +540,15 @@
       buildFilters();
       buildTimeline();
       buildEventList();
-      seekTo(0);
+      // 支持 ?t=<毫秒> 直接定位到指定时刻（如场次对比页跳转过来）；越界由 seekTo 收敛
+      seekTo(Number.isFinite(startT) && startT > 0 ? startT : 0);
     }
 
     const params = new URLSearchParams(location.search);
     const fileId = params.get('file');
     const runId = params.get('run');
-    if (fileId && runId !== null) initPlayer(fileId, runId);
+    const startT = Number(params.get('t'));
+    if (fileId && runId !== null) initPlayer(fileId, runId, startT);
     else loadList();
   })();
   </script>

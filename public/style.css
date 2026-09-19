@@ -407,3 +407,20 @@ tr.current-row td { background: #24304a; }
 .replay-kbd { font-size: 12px; color: #5d6478; }
 .bad-warn-chip { background: #4a3a1e; color: #f0c169; }
 
+/* 场次对比（/compare.html，只读） */
+#cmpTable td { vertical-align: top; }
+tr.cmp-row-added td { background: rgba(47, 111, 74, 0.10); }
+tr.cmp-row-removed td { background: rgba(160, 58, 58, 0.10); }
+.cmp-delta {
+  display: inline-block;
+  margin-top: 3px;
+  padding: 1px 8px;
+  border-radius: 10px;
+  font-size: 12px;
+}
+.cmp-delta.pos { background: #4a2b2b; color: #ff9c9c; }
+.cmp-delta.neg { background: #23402a; color: #8fe3a5; }
+.cmp-delta.zero { background: #2c3040; color: #8b93a8; }
+.cmp-cue-link { display: inline-block; color: #e8eaf0; text-decoration: none; }
+.cmp-cue-link:hover { color: #8ab4ff; }
+

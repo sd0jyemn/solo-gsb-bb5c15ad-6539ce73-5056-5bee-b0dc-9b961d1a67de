@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>场次对比 · 舞台口令同步系统</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <h1>🔀 场次对比（只读）</h1>
+    <nav><a href="/">← 返回首页</a></nav>
+  </header>
+  <main>
+    <!-- 场次选择 -->
+    <div class="card">
+      <h2>选择两个已结束场次</h2>
+      <div id="pickWarn" class="replay-warn"></div>
+      <div id="pickLoading" class="muted">正在读取 data 目录中的已结束场次…</div>
+      <div id="pickForm" style="display:none">
+        <div class="row">
+          <label class="narrow" style="align-self:center">左场（基准）</label>
+          <select id="leftSel"></select>
+        </div>
+        <div class="row">
+          <label class="narrow" style="align-self:center">右场（对照）</label>
+          <select id="rightSel"></select>
+        </div>
+        <div class="row">
+          <button id="compareBtn">生成逐口令对照表</button>
+        </div>
+        <div class="muted">
+          匹配键 = 规范化口令文本（去首尾空白、折叠连续空白）+ 排序后的目标岗位；
+          动态规划保持原顺序对齐，重复键出现多种最优解时依次按「总序号偏移最小、左场序号优先」裁决。
+          新增 = 仅右场（对照）有的口令，删除 = 仅左场（基准）有的口令。
+        </div>
+      </div>
+    </div>
+
+    <!-- 对照结果 -->
+    <div id="resultView" style="display:none">
+      <div class="card">
+        <h2>对照结果</h2>
+        <div class="replay-meta" id="cmpMeta"></div>
+        <div id="cmpSummary" style="margin-top:12px"></div>
+      </div>
+      <div class="card">
+        <h2>逐口令对照表</h2>
+        <table id="cmpTable">
+          <thead>
+            <tr>
+              <th>状态</th>
+              <th>左场口令（基准）</th>
+              <th>右场口令（对照）</th>
+              <th>耗时（开始→完成）</th>
+              <th>超时</th>
+              <th>迟到确认</th>
+              <th>修订</th>
+              <th>暂停</th>
+            </tr>
+          </thead>
+          <tbody id="cmpTbody"></tbody>
+        </table>
+        <div class="muted" style="margin-top:10px">
+          指标列展示「左场 → 右场」及两场差值（右 − 左；减少为绿色、增多为红色）；点击任一侧口令可跳到对应场次的复盘时刻。
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <!-- 只读：本页面仅发起 GET 请求拉取历史数据，不建立 WebSocket、不写任何日志。
+       引入 common.js 仅为复用 escapeHtml，不会调用其中的 connect()。 -->
+  <script src="common.js"></script>
+  <script>
+  (() => {
+    'use strict';
+    const esc = CueClient.escapeHtml;
+
+    const pickWarn = document.getElementById('pickWarn');
+    const pickLoading = document.getElementById('pickLoading');
+    const pickForm = document.getElementById('pickForm');
+    const leftSel = document.getElementById('leftSel');
+    const rightSel = document.getElementById('rightSel');
+    const compareBtn = document.getElementById('compareBtn');
+    const resultView = document.getElementById('resultView');
+    const cmpMeta = document.getElementById('cmpMeta');
+    const cmpSummary = document.getElementById('cmpSummary');
+    const cmpTbody = document.getElementById('cmpTbody');
+
+    let sessions = [];
+    let cmp = null;
+
+    function fmtClock(iso) {
+      const d = new Date(iso);
+      return d.toLocaleString('zh-CN', { hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    }
+    // 时长：12.5s / 1分23.5s（支持负值，用于差值）
+    function fmtMs(ms) {
+      if (ms == null) return '—';
+      const sign = ms < 0 ? '-' : '';
+      const sec = Math.abs(ms) / 1000;
+      if (sec < 60) return `${sign}${Math.round(sec * 10) / 10}s`;
+      const mnt = Math.floor(sec / 60);
+      return `${sign}${mnt}分${Math.round((sec - mnt * 60) * 10) / 10}s`;
+    }
+    // 事件时刻：+m:ss.t（与复盘页时间轴一致）
+    function fmtT(ms) {
+      ms = Math.max(0, Math.round(ms * 10) / 10);
+      const m = Math.floor(ms / 60000);
+      const s = Math.floor((ms % 60000) / 1000);
+      const tenth = Math.floor((ms % 1000) / 100);
+      return `${m}:${String(s).padStart(2, '0')}.${tenth}`;
+    }
+
+    function showWarn(html) {
+      pickWarn.classList.add('show');
+      pickWarn.innerHTML = html;
+    }
+
+    // ---------------------------------------------------------------------
+    // 场次选择
+    // ---------------------------------------------------------------------
+    const sid = (s) => `${s.fileId}:${s.runId}`;
+    const sessionLabel = (s) =>
+      `${fmtClock(s.startedAt)} → ${fmtClock(s.finishedAt)} · ${s.cueCount} 条口令 · 日志 ${s.fileId.slice(0, 8)}… 第 ${s.runId + 1} 段`;
+
+    async function loadSessions() {
+      let payload;
+      try {
+        payload = await (await fetch('/api/replay/sessions')).json();
+      } catch {
+        pickLoading.innerHTML = '<span style="color:#ff9c9c">场次列表加载失败，请确认服务已启动</span>';
+        return;
+      }
+      sessions = payload.sessions || [];
+      pickLoading.style.display = 'none';
+      if (!sessions.length) {
+        showWarn('data 目录中尚无已结束（session-start → sequence-finished 完整闭合）的场次，无法对比。');
+        return;
+      }
+      pickForm.style.display = '';
+      const opts = sessions.map((s) => `<option value="${esc(sid(s))}">${esc(sessionLabel(s))}</option>`).join('');
+      leftSel.innerHTML = opts;
+      rightSel.innerHTML = opts;
+      // 默认：列表按开始时间倒序，基准取次新场、对照取最新场（仅一场时两侧同为该场）
+      leftSel.value = sid(sessions[Math.min(1, sessions.length - 1)]);
+      rightSel.value = sid(sessions[0]);
+      // URL 深链：compare.html?left=<fileId>&leftRun=<n>&right=<fileId>&rightRun=<n>
+      const params = new URLSearchParams(location.search);
+      const lv = params.get('left');
+      const lr = params.get('leftRun');
+      const rv = params.get('right');
+      const rr = params.get('rightRun');
+      if (lv && lr !== null && sessions.some((s) => sid(s) === `${lv}:${lr}`)) leftSel.value = `${lv}:${lr}`;
+      if (rv && rr !== null && sessions.some((s) => sid(s) === `${rv}:${rr}`)) rightSel.value = `${rv}:${rr}`;
+      if (lv && lr !== null && rv && rr !== null) runCompare();
+    }
+
+    // ---------------------------------------------------------------------
+    // 对照表渲染
+    // ---------------------------------------------------------------------
+    const STATUS = {
+      match: { label: '匹配', cls: '' },
+      added: { label: '新增', cls: 'ok' },
+      removed: { label: '删除', cls: 'timeout' },
+    };
+
+    function deltaBadge(v, unit) {
+      if (v == null) return '<span class="muted">—</span>';
+      if (v === 0) return '<span class="cmp-delta zero">0</span>';
+      const cls = v < 0 ? 'neg' : 'pos';
+      const text = unit === 's' ? fmtMs(v) : String(v);
+      return `<span class="cmp-delta ${cls}">${v > 0 ? '+' : ''}${text}</span>`;
+    }
+
+    // 指标单元格：左场 → 右场 + 差值徽标（unit='s' 表示时长，否则为次数）
+    function metricCell(lv, rv, dv, unit) {
+      const fmt = (v) => (v == null ? '—' : unit === 's' ? fmtMs(v) : String(v));
+      return `${fmt(lv)} → ${fmt(rv)}<br>${deltaBadge(dv, unit)}`;
+    }
+
+    // 口令单元格：点击跳到对应场次的复盘时刻（该口令首次发出时）
+    function cueCell(cue, side) {
+      if (!cue) return '<span class="muted">—（本场无此口令）</span>';
+      const s = side === 'left' ? cmp.left : cmp.right;
+      const t = cue.startedT || 0;
+      const href = `replay.html?file=${encodeURIComponent(s.fileId)}&run=${s.runId}&t=${Math.round(t)}`;
+      return `<a class="cmp-cue-link" href="${href}" title="跳到该场复盘 +${fmtT(t)} 时刻">
+        <span class="chip">#${cue.seq}</span> ${esc(cue.text)}
+        <span class="muted">→ ${cue.targets.map(esc).join('、')}</span>
+        <div class="muted">开始于 +${fmtT(t)} · 点击跳转复盘 ↗</div>
+      </a>`;
+    }
+
+    function render() {
+      cmpMeta.innerHTML = `
+        <span>左场（基准）：<b>${esc(fmtClock(cmp.left.startedAt))}</b> 开始 · ${cmp.left.cueCount} 条口令 · 时限 ${cmp.left.timeoutSec}s · 日志 ${esc(cmp.left.fileId.slice(0, 8))}… 第 ${cmp.left.runId + 1} 段</span>
+        <span>右场（对照）：<b>${esc(fmtClock(cmp.right.startedAt))}</b> 开始 · ${cmp.right.cueCount} 条口令 · 时限 ${cmp.right.timeoutSec}s · 日志 ${esc(cmp.right.fileId.slice(0, 8))}… 第 ${cmp.right.runId + 1} 段</span>`;
+      cmpSummary.innerHTML =
+        `<span class="chip">匹配 ${cmp.summary.matched}</span>` +
+        `<span class="chip ok">新增 ${cmp.summary.added}</span>` +
+        `<span class="chip timeout">删除 ${cmp.summary.removed}</span>`;
+
+      cmpTbody.innerHTML = cmp.rows.map((row) => {
+        const st = STATUS[row.type];
+        const l = row.left;
+        const r = row.right;
+        const d = row.delta || {};
+        return `<tr class="cmp-row-${row.type}">
+          <td><span class="chip ${st.cls}">${st.label}</span></td>
+          <td>${cueCell(l, 'left')}</td>
+          <td>${cueCell(r, 'right')}</td>
+          <td>${metricCell(l && l.durationMs, r && r.durationMs, d.durationMs, 's')}</td>
+          <td>${metricCell(l && l.timeouts, r && r.timeouts, d.timeouts)}</td>
+          <td>${metricCell(l && l.lateConfirms, r && r.lateConfirms, d.lateConfirms)}</td>
+          <td>${metricCell(l && l.revisions, r && r.revisions, d.revisions)}</td>
+          <td>${metricCell(l && l.pauses, r && r.pauses, d.pauses)}</td>
+        </tr>`;
+      }).join('');
+      resultView.style.display = '';
+    }
+
+    async function runCompare() {
+      const [lf, lr] = leftSel.value.split(':');
+      const [rf, rr] = rightSel.value.split(':');
+      compareBtn.disabled = true;
+      let payload = null;
+      let status = 0;
+      try {
+        const res = await fetch(`/api/compare/${encodeURIComponent(lf)}/${encodeURIComponent(lr)}/${encodeURIComponent(rf)}/${encodeURIComponent(rr)}`);
+        status = res.status;
+        payload = await res.json();
+      } catch {
+        showWarn('对比接口请求失败，请确认服务已启动');
+        compareBtn.disabled = false;
+        return;
+      }
+      compareBtn.disabled = false;
+      if (status !== 200) {
+        resultView.style.display = 'none';
+        showWarn(`对比失败：${esc((payload && payload.error) || `HTTP ${status}`)}`);
+        return;
+      }
+      pickWarn.classList.remove('show');
+      cmp = payload;
+      render();
+      // 更新 URL 深链，便于收藏 / 分享本次对比
+      history.replaceState(null, '',
+        `compare.html?left=${encodeURIComponent(lf)}&leftRun=${encodeURIComponent(lr)}&right=${encodeURIComponent(rf)}&rightRun=${encodeURIComponent(rr)}`);
+    }
+
+    compareBtn.addEventListener('click', runCompare);
+    loadSessions();
+  })();
+  </script>
+</body>
+</html>
