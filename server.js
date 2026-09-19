@@ -7,6 +7,7 @@ const crypto = require('crypto');
 const express = require('express');
 const { WebSocketServer } = require('ws');
 const replay = require('./replay'); // 演出复盘（只读）模块：只读 data 目录事件日志，不触碰当前演出状态
+const compare = require('./compare'); // 场次对比（只读）模块：复用复盘解析器做两场口令序列对齐，不写日志、不接 WebSocket
 
 const PORT = process.env.PORT || 3000;
 const DATA_DIR = path.join(__dirname, 'data');
@@ -182,6 +183,28 @@ app.get('/api/replay/sessions', (req, res) => {
 
 app.get('/api/replay/sessions/:fileId/:runId', (req, res) => {
   const result = replay.getSession(DATA_DIR, req.params.fileId, req.params.runId);
+  if (result.error === 'badId') return res.status(400).json({ error: '场次 ID 不合法' });
+  if (result.error === 'notFound') return res.status(404).json({ error: '场次不存在或尚未结束' });
+  if (result.error) return res.status(500).json({ error: '读取事件日志失败' });
+  res.json(result);
+});
+
+// ---------------------------------------------------------------------------
+// 场次对比（只读）HTTP 接口：仅供 /compare.html 调用。
+// 在两个已结束场次之间生成逐口令对照表（匹配 / 新增 / 删除）。
+// 复用复盘模块的只读日志解析器：不写事件日志、不引用当前演出状态、不接 WebSocket。
+//   GET /api/compare/sessions?a=<fileId>/<runId>&b=<fileId>/<runId>
+// ---------------------------------------------------------------------------
+app.get('/api/compare/sessions', (req, res) => {
+  const parseRef = (raw) => {
+    const parts = String(raw || '').split('/');
+    if (parts.length !== 2 || parts[0] === '' || parts[1] === '') return null;
+    return { fileId: parts[0], runId: parts[1] };
+  };
+  const a = parseRef(req.query.a);
+  const b = parseRef(req.query.b);
+  if (!a || !b) return res.status(400).json({ error: '请通过 a、b 参数指定两个场次（fileId/runId）' });
+  const result = compare.compareSessions(DATA_DIR, a.fileId, a.runId, b.fileId, b.runId);
   if (result.error === 'badId') return res.status(400).json({ error: '场次 ID 不合法' });
   if (result.error === 'notFound') return res.status(404).json({ error: '场次不存在或尚未结束' });
   if (result.error) return res.status(500).json({ error: '读取事件日志失败' });
@@ -996,6 +1019,7 @@ server.listen(PORT, () => {
   console.log(`  控制端:   http://localhost:${PORT}/control.html`);
   console.log(`  岗位端:   http://localhost:${PORT}/position.html`);
   console.log(`  演出复盘: http://localhost:${PORT}/replay.html （只读，回放已结束场次）`);
+  console.log(`  场次对比: http://localhost:${PORT}/compare.html （只读，逐口令对齐两个已结束场次）`);
   console.log(`  指挥权租约: ${LEASE_TTL_MS / 1000} 秒（心跳续期，超时/断线自动释放）`);
   console.log(`  事件日志: data/events-${state.sessionId}.jsonl`);
 });

@@ -8,6 +8,8 @@
 
 此外提供**只读的「演出复盘」模块**（<http://localhost:3000/replay.html>）：读取 `data` 目录中**已结束场次**（`session-start` → `sequence-finished` 完整闭合的一段）的 JSONL 事件日志，列出全部场次并重建**可拖动的口令时间轴**，支持按事件类型 / 岗位筛选、1×/2×/4× 播放、暂停与任意时间点跳转；跳转后从本场起点按事件顺序**确定性重放**到目标时刻，当前口令、确认 / 超时、替岗、修订与暂停状态与顺序播放完全一致。复盘为纯读操作，不接入 WebSocket，绝不写入当前演出状态或事件日志；日志中个别损坏行只产生告警并跳过，不影响整场解析。
 
+在复盘之上还提供**只读的「场次对比」模块**（<http://localhost:3000/compare.html>）：从复盘场次列表中选择**两个已结束场次**，逐口令生成对照表。匹配键为**规范化口令文本**（NFKC 全角/半角统一、去除汉字间排版空白、折叠空白、小写）加**排序去重后的目标岗位**；再以**动态规划在保持两场原顺序**的前提下做序列对齐（类 Needleman–Wunsch / LCS）。重复键出现多种最优解时，依次按**匹配数最多 → 总序号偏移 Σ|A序号−B序号| 最小 → 左场序号优先**裁决出唯一结果。对照表逐行标出**匹配**（两场共有）、**新增**（仅右场 B）、**删除**（仅左场 A）；每个匹配项展示**从口令开始（修订重发不重置）到完成的耗时**与**超时、迟到确认、修订、暂停次数**及两场差值（B − A），**点击任一侧口令即在复盘中打开该场次并跳转到该口令发出时刻**。对比同样为纯只读：仅一个 GET 接口、复用复盘的日志解析器，不写任何日志、不连接 WebSocket。
+
 技术栈：Node.js + Express + WebSocket（`ws`）+ 原生前端（无框架）。
 
 ## 快速开始（单条命令）
@@ -35,6 +37,7 @@ npm install && npm start
 | 控制端 | <http://localhost:3000/control.html> | 申请 / 释放 / 接管指挥权租约，开始演出、监控确认状态、推进 / 暂停恢复 / 撤回纠正重发 / 重置（含草稿选择） |
 | 岗位端 | <http://localhost:3000/position.html> | 岗位上岗、接收口令、确认 |
 | 演出复盘（只读） | <http://localhost:3000/replay.html> | 列出 `data` 中已结束场次，重建可拖动口令时间轴，事件类型 / 岗位筛选，1×/2×/4× 播放、暂停与任意时刻确定性重放跳转 |
+| 场次对比（只读） | <http://localhost:3000/compare.html> | 选择两个已结束场次，按规范化口令 + 排序目标岗位做 DP 序列对齐，生成新增 / 删除 / 匹配逐口令对照表（耗时与超时、迟到、修订、暂停次数及差值，点击跳转复盘时刻） |
 
 > 修改端口：设置环境变量 `PORT`，如 `PORT=8080 npm start`，Compose 中同步调整 `ports` 映射。
 
@@ -100,6 +103,25 @@ npm install && npm start
 - `GET /api/replay/sessions`：`{ sessions: [{ fileId, runId, startedAt, finishedAt, durationMs, cueCount, eventCount, timeoutSec }], fileWarnings: { [fileId]: { count, samples } } }`
 - `GET /api/replay/sessions/:fileId/:runId`：`{ session, timeoutSec, sequence, events, positions, warnings, fileWarningCount }`；事件保持日志行序并附相对本场起点的毫秒偏移 `t`。`fileId` 强制 UUID 形状（杜绝路径穿越），非法 / 不存在返回 400 / 404。
 
+复盘页还支持深链定位：`replay.html?file=<fileId>&run=<runId>&t=<毫秒>` 打开单场后直接跳转到相对本场起点 `t` 毫秒的时刻（场次对比页的「点击跳转」即使用此链接）。
+
+## 场次对比（只读对照两个已结束场次）
+
+打开 <http://localhost:3000/compare.html>（首页「场次对比」卡片同入口）。对比完全基于 `data/events-<场次ID>.jsonl` 历史日志，**只读**：页面不建立 WebSocket 连接、只有一个 GET 接口，服务端复用复盘模块的逐行解析器，绝不影响当前演出状态、绝不追加或修改事件日志。
+
+- **选择场次**：左右两个下拉均来自复盘场次接口（只含 `session-start` → `sequence-finished` 完整闭合的已结束场次），不能选择同一场；点击「生成逐口令对照表」。下拉旁的「↗ 在复盘中打开」可单独打开任一场。支持 URL 预选：`compare.html?a=<fileId>/<runId>&b=<fileId>/<runId>`。
+- **匹配键**：先以**规范化口令文本**（NFKC 全角 / 半角统一、删除汉字两侧排版空白、折叠连续空白、去首尾空白、转小写）与**排序、去重后的目标岗位**构造匹配键。因此全角空格、大小写、岗位书写顺序、重复岗位等排版差异不影响匹配；口令被撤回修订时仍按本场冻结快照的**原始口令**匹配（最终修订版文本在匹配项中单独以「最终：…」展示）。
+- **序列对齐**：以**动态规划**在保持两场口令原顺序的前提下对齐（匹配 / 左场删除 / 右场新增三态转移）。当重复键产生多种最优对齐时，按以下顺序裁决唯一结果：
+  1. **匹配数最多**；
+  2. 所有匹配对的**总序号偏移** Σ|A序号 − B序号| **最小**；
+  3. 仍并列时按左场序号升序逐项比较，**左场序号优先**（左序号相同再比右序号）取最小者。
+- **对照表**：逐行标出**匹配 / 新增（仅右场 B）/ 删除（仅左场 A）**，顶部给出计数汇总。每个匹配项展示该口令**从开始发令到全员确认完成的墙钟耗时**（修订重发不重置起点，暂停墙钟计入）、**超时次数、迟到确认次数、修订次数、暂停次数**，以及两场各项的**差值（B − A）**：耗时差以带符号秒数显示（暖色），异常计数增加偏红、减少偏绿、持平置灰；新增 / 删除行展示单场指标。
+- **点击跳转复盘时刻**：对照表中任一侧的口令都是链接，点击即在 `replay.html` 打开对应场次并定位到该口令的 `cue-started` 时刻（相对本场起点的毫秒偏移），随后可照常播放 / 拖动查看完整上下文。
+
+场次对比只读 HTTP 接口（GET）：
+
+- `GET /api/compare/sessions?a=<fileId>/<runId>&b=<fileId>/<runId>`：`{ left, right, rows, summary }`。`left` / `right` 含场次摘要 `session`、确认时限 `timeoutSec` 与逐口令指标 `cues`（`seq` / `text` / `targets` / `key` / `startT` / `durationMs` / `timeouts` / `lateConfirms` / `revisions` / `pauses` / `finalText`）；`rows` 为对齐结果，每项为 `{type:'match', left, right}`、`{type:'added', right}` 或 `{type:'deleted', left}`；`summary` 为 `{leftCount, rightCount, matched, added, deleted}`。参数缺失 / 非法 ID 返回 400，任一场不存在或未结束返回 404。
+
 ## 核心规则
 
 - **指挥权租约**：开始 / 推进 / 替岗 / 撤回 / 暂停 / 恢复 / 重置七类操作仅租约持有者可执行。租约默认 15 秒、按心跳续期；申请与接管的检查与授予在同一同步消息处理内完成（原子裁决，并发申请先到者得）；持有者断线立即释放，心跳停止超时自动释放；每次授予生成新 `token`，旧连接的迟到心跳 / 释放凭旧 `token` 一律拒绝并记录，绝不续活新租约。持有者与剩余有效期随全量快照下发，非持有者前端按钮禁用、服务端同步拒绝（`lease-op-denied`）。
@@ -119,17 +141,20 @@ npm install && npm start
 ```
 ├── server.js            # Express + WebSocket 服务端，状态机与日志
 ├── replay.js            # 演出复盘（只读）：JSONL 逐行解析、坏行告警、场次切分与单场接口
+├── compare.js           # 场次对比（只读）：匹配键规范化、逐口令指标提取与 DP 序列对齐
 ├── public/
 │   ├── index.html       # 首页（导航 + 事件日志）
 │   ├── director.html    # 导演端：序列编排
 │   ├── control.html     # 控制端：发令 / 推进 / 暂停恢复 / 监控
 │   ├── position.html    # 岗位端：确认
-│   ├── replay.html      # 演出复盘：场次列表 + 可拖动时间轴回放
+│   ├── replay.html      # 演出复盘：场次列表 + 可拖动时间轴回放（支持 ?t= 深链定位）
 │   ├── replay.js        # 复盘确定性重放器（纯函数折叠）与事件分类
+│   ├── compare.html     # 场次对比：两场选择 + 逐口令对照表（匹配 / 新增 / 删除 + 指标差值）
 │   ├── common.js        # 自动重连 WebSocket 封装与渲染工具
 │   └── style.css
 ├── test/smoke.js        # 端到端冒烟测试（176 项断言）
 ├── test/replay.js       # 演出复盘测试（解析/坏行/切分/接口/确定性重放，37 项断言）
+├── test/compare.js      # 场次对比测试（匹配键/指标/DP 对齐与三层裁决穷举交叉验证/只读接口，40 项断言）
 ├── Dockerfile
 ├── docker-compose.yml
 └── data/                # 事件日志落盘目录（运行时生成）
@@ -142,7 +167,10 @@ npm install && npm start
 ```bash
 node test/smoke.js
 node test/replay.js
+node test/compare.js
 ```
+
+`test/compare.js` 覆盖场次对比：匹配键规范化（NFKC / 汉字间排版空白 / 大小写 / 岗位排序去重）、逐口令指标提取（耗时从首次发令到完成、修订不重置起点、超时 / 迟到确认 / 修订 / 暂停计数、修订改文本时键按原始口令而 finalText 反映最终版）、DP 序列对齐（保持原顺序、匹配 / 新增 / 删除、全角空白与岗位顺序差异仍匹配）、重复键多解的三层裁决（匹配数最多 → 总序号偏移最小 → 左场序号优先）并以 **400 组随机小序列穷举所有保序匹配集合交叉验证 DP 最优解**、端到端 `compareSessions`（汇总计数 / 非法 ID / 不存在场次）、只读 HTTP 接口（缺参 400 / 非法 ID 与路径穿越 400 / 404 / 200 结构）以及对比页面可访问且不含 WebSocket 代码。
 
 `test/replay.js` 覆盖演出复盘：JSONL 逐行解析时坏行跳过并返回行号 / 原因 / 原文告警且不中断整场、仅列出 `session-start → sequence-finished` 闭合场次（重置中断的不列出）、场前 `sequence-set` 与闭合后 `session-reset` 不计入场内事件、确认时限取最近 `sequence-set` / `draft-published`、岗位聚合与首次出现顺序、只读 HTTP 接口（200 / 非法 ID 400 / 不存在 404 / 路径穿越拒绝）、以及**确定性重放**（顺序播放逐帧到达终点与直接跳转终点的完整状态严格相等、任意跳转后再到终点一致、重复折叠无差异），并逐项核对当前口令、暂停 / 恢复、暂停中确认拒绝、撤回封存与修订重发、超时、替岗移交、迟到确认、全场完成等现场。
 

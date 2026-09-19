@@ -507,7 +507,7 @@
     // ---------------------------------------------------------------------
     // 初始化
     // ---------------------------------------------------------------------
-    async function initPlayer(fileId, runId) {
+    async function initPlayer(fileId, runId, seekT) {
       listView.style.display = 'none';
       playerView.style.display = '';
       let payload;
@@ -541,12 +541,15 @@
       buildTimeline();
       buildEventList();
       seekTo(0);
+      // 场次对比等外部页面跳转：打开复盘并定位到指定相对时刻（毫秒）
+      if (Number.isFinite(seekT) && seekT > 0) seekTo(Math.min(seekT, duration));
     }
 
     const params = new URLSearchParams(location.search);
     const fileId = params.get('file');
     const runId = params.get('run');
-    if (fileId && runId !== null) initPlayer(fileId, runId);
+    const seekParam = Number(params.get('t'));
+    if (fileId && runId !== null) initPlayer(fileId, runId, seekParam);
     else loadList();
   })();
   </script>
